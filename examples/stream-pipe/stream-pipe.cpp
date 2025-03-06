@@ -8,7 +8,7 @@
 #include <fstream>
 
 #define SAMPLE_RATE 16000
-#define BUFFER_DURATION_SEC 3
+#define BUFFER_DURATION_SEC 10
 #define BUFFER_SIZE (SAMPLE_RATE * BUFFER_DURATION_SEC)
 
 // command-line parameters
@@ -28,7 +28,7 @@ struct whisper_params {
     bool translate     = false;
     bool no_fallback   = false;
     bool print_special = false;
-    bool no_context    = true;
+    bool no_context    = false;
     bool no_timestamps = false;
     bool tinydiarize   = false;
     bool save_audio    = false; // save audio to wav file
@@ -311,8 +311,9 @@ int main(int argc, char ** argv) {
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
 
     std::vector<float> audio_buffer(BUFFER_SIZE, 0.0f);
+    std::vector<whisper_token> prompt_tokens;
+    std::vector<whisper_token> prev_prompt_tokens;
     std::vector<StreamToken> accumulated_tokens;
-    int last_truncated_position = 0; // Store the last truncation point
     std::string accumulated_text; // Store all transcriptions for the current segment
 
     wav_writer wavWriter;
@@ -324,7 +325,6 @@ int main(int argc, char ** argv) {
 
     // Initialize global indexes:
     size_t total_index = 0;
-    size_t offset_start_index = 0;
     int speech_counter = 0;
     bool was_speaking = false;
 
@@ -340,58 +340,35 @@ int main(int argc, char ** argv) {
             wavWriter.write(new_audio.data(), new_audio.size());
         }
 
-        if (new_audio.size() < SAMPLE_RATE / 2) {
-            new_audio.resize(SAMPLE_RATE / 2, 0.0f);
-        }
-
-        // Check if appending new_audio will fit into audio_buffer (which has fixed capacity BUFFER_SIZE)
-        // printf("\nCurrent audio buffer size: %zu. New samples: %zu\n", audio_buffer.size(), new_samples);
-        if (total_index + new_samples <= BUFFER_SIZE) {
-            // There's enough room: copy new samples at the end.
-            std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
-        } else {
-            // Calculate current valid samples and how many need to be removed.
-            size_t current_buffer_samples = total_index - offset_start_index;
-            size_t samples_to_remove = (current_buffer_samples + new_samples) - BUFFER_SIZE;
-            size_t remaining_samples = current_buffer_samples - samples_to_remove;
-
-            // Shift the valid samples left by samples_to_remove positions.
-            // From: starting at audio_buffer.begin() + samples_to_remove,
-            // to:   audio_buffer.begin() + samples_to_remove + remaining_samples,
-            // Copy them to the beginning of the buffer.
-            std::copy(audio_buffer.begin() + samples_to_remove,
-                    audio_buffer.begin() + samples_to_remove + remaining_samples,
-                    audio_buffer.begin());
-
-            // Now copy the new samples into the freed space at the end.
-            std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + remaining_samples);
-
-            offset_start_index += samples_to_remove;
-        }
-
         // Update the total_index (global count) by the number of new samples read.
+        printf("\n%i/%i %i: ", speech_counter, total_index, new_samples);
+        audio_buffer.resize(BUFFER_SIZE + total_index + new_samples);
+        std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
         total_index += new_samples;
-
-        int total_ms = ((int)total_index * 1000) / SAMPLE_RATE;
-        int offset_ms = ((int)offset_start_index * 1000) / SAMPLE_RATE;
 
         bool is_speaking = !::vad_simple(new_audio, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
         if (!is_speaking || !was_speaking) {
             speech_counter++;
-            // printf("\n[New Speech Segment %d]\n\n", speech_counter);
+            printf("\n[New Speech Segment %d]\n\n", speech_counter);
             fflush(stdout);
 
             // Reset the buffer and indices for a new speech segment
-            audio_buffer.assign(BUFFER_SIZE, 0.0f);
-            // Copy new_audio into the beginning of the buffer
-            std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin());
-            total_index = new_audio.size();
-            offset_start_index = 0;
+            total_index = 0;
+            audio_buffer.clear();
+            audio_buffer.resize(BUFFER_SIZE + total_index + new_samples);
+            std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
+            total_index += new_samples;
 
+            prev_prompt_tokens.clear();
+            prev_prompt_tokens.resize(prompt_tokens.size());
+            std::copy(prompt_tokens.begin(), prompt_tokens.end(), prev_prompt_tokens.begin());
+
+            prompt_tokens.clear();
             accumulated_text.clear();
             accumulated_tokens.clear();
-            last_truncated_position = 0;
         }
+        int total_ms = ((int)total_index * 1000) / SAMPLE_RATE;
+
         was_speaking = is_speaking;
 
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -402,18 +379,24 @@ int main(int argc, char ** argv) {
         wparams.language         = "en";
         wparams.n_threads        = params.n_threads;
         wparams.audio_ctx        = 0;
-        wparams.offset_ms        = offset_ms;
         wparams.token_timestamps = true;
+        wparams.suppress_nst     = true;
+        wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
+        wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
+
+        if (audio_buffer.size() < SAMPLE_RATE / 2) {
+            audio_buffer.resize(SAMPLE_RATE / 2, 0.0f);
+        }
 
         if (whisper_full(ctx, wparams, audio_buffer.data(), audio_buffer.size()) != 0) {
             fprintf(stderr, "Failed to process audio\n");
             return 2;
         }
 
-        // printf("\n%d / %d: ", total_ms, offset_ms);
         // printf("\33[2K\r");
         std::string speaker = "";
         std::vector<StreamToken> new_tokens;
+        prompt_tokens.clear();
         for (int i = 0; i < whisper_full_n_segments(ctx); ++i) {
             // printf("%s ", whisper_full_get_segment_text(ctx, i));
 
@@ -433,32 +416,17 @@ int main(int argc, char ** argv) {
                 // printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
                 // printf("%s (%d/%d) ", text, data.id, id);
                 new_tokens.push_back(token);
+
+                prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
             }
         }
 
-        if (!new_tokens.empty()) {
-            int first_new_token_id = new_tokens.front().data.id;
-            // Start looking at or after the last truncated position
-            auto it = std::find_if(accumulated_tokens.begin() + last_truncated_position, accumulated_tokens.end(),
-                                [&](const StreamToken& token) {
-                                    return token.data.id == first_new_token_id;
-                                });
-
-            // If we find a match, truncate the accumulated tokens list at that point
-            if (it != accumulated_tokens.end()) {
-                int index = std::distance(accumulated_tokens.begin(), it);
-                last_truncated_position = index;
-                accumulated_tokens.erase(it, accumulated_tokens.end());
-            }
-
-            // Append new tokens
-            accumulated_tokens.insert(accumulated_tokens.end(), new_tokens.begin(), new_tokens.end());
-        }
+        accumulated_tokens = new_tokens;
 
         // output_json(ctx, params, speech_counter, accumulated_tokens, true);
         printf("\n%i: ", speech_counter);
         for (const auto& token : accumulated_tokens) {
-            printf("%s (%i)", token.text.c_str(), token.data.t0);
+            printf("%s", token.text.c_str());
         }
         fflush(stdout);
     }
