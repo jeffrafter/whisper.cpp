@@ -49,3 +49,15 @@ cmake --build build --config Release
 ## Web version
 
 This tool can also run in the browser: [examples/stream.wasm](/examples/stream.wasm)
+
+## Examples
+
+```
+ffmpeg -f avfoundation -i ":0" -f s16le -ac 1 -ar 16000 - | sox -t raw -r 16000 -e signed-integer -b 16 -c 1 - -d
+```
+
+```
+ffmpeg -f avfoundation -i ":0" -f s16le -ac 1 -ar 16000 - | ./build/bin/whisper-stream-pipe -m models/ggml-tiny.en.bin -bs -1 -f out.txt
+```
+
+tail -f out.txt

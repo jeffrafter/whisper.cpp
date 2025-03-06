@@ -39,6 +39,11 @@ struct whisper_params {
     std::string model     = "models/ggml-base.en.bin";
 };
 
+struct StreamToken {
+    whisper_token_data data;
+    std::string text;
+};
+
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
 
 static bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
@@ -109,6 +114,167 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+static char * escape_double_quotes_and_backslashes(const char * str) {
+    if (str == NULL) {
+        return NULL;
+    }
+
+    size_t escaped_length = strlen(str) + 1;
+
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        if (str[i] == '"' || str[i] == '\\') {
+            escaped_length++;
+        }
+    }
+
+    char * escaped = (char *)calloc(escaped_length, 1); // pre-zeroed
+    if (escaped == NULL) {
+        return NULL;
+    }
+
+    size_t pos = 0;
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        if (str[i] == '"' || str[i] == '\\') {
+            escaped[pos++] = '\\';
+        }
+        escaped[pos++] = str[i];
+    }
+
+    // no need to set zero due to calloc() being used prior
+
+    return escaped;
+}
+
+static bool output_json(
+            struct whisper_context * ctx,
+            const whisper_params & params,
+            const int speech_counter,
+            std::vector<StreamToken> accumulated_tokens,
+            bool full) {
+    int indent = 0;
+
+    auto doindent = [&]() {
+        for (int i = 0; i < indent; i++) std::cout << "\t";
+    };
+
+    auto start_arr = [&](const char *name) {
+        doindent();
+        std::cout << "\"" << name << "\": [\n";
+        indent++;
+    };
+
+    auto end_arr = [&](bool end) {
+        indent--;
+        doindent();
+        std::cout << (end ? "]\n" : "],\n");
+    };
+
+    auto start_obj = [&](const char *name) {
+        doindent();
+        if (name) {
+            std::cout << "\"" << name << "\": {\n";
+        } else {
+            std::cout << "{\n";
+        }
+        indent++;
+    };
+
+    auto end_obj = [&](bool end) {
+        indent--;
+        doindent();
+        std::cout << (end ? "}\n" : "},\n");
+    };
+
+    auto start_value = [&](const char *name) {
+        doindent();
+        std::cout << "\"" << name << "\": ";
+    };
+
+    auto value_s = [&](const char *name, const char *val, bool end) {
+        start_value(name);
+        char * val_escaped = escape_double_quotes_and_backslashes(val);
+        std::cout << "\"" << val_escaped << (end ? "\"\n" : "\",\n");
+        free(val_escaped);
+    };
+
+    auto end_value = [&](bool end) {
+        std::cout << (end ? "\n" : ",\n");
+    };
+
+    auto value_i = [&](const char *name, const int64_t val, bool end) {
+        start_value(name);
+        std::cout << val;
+        end_value(end);
+    };
+
+    auto value_f = [&](const char *name, const float val, bool end) {
+        start_value(name);
+        std::cout << val;
+        end_value(end);
+    };
+
+    auto value_b = [&](const char *name, const bool val, bool end) {
+        start_value(name);
+        std::cout << (val ? "true" : "false");
+        end_value(end);
+    };
+
+    auto times_o = [&](int64_t t0, int64_t t1, bool end) {
+        start_obj("timestamps");
+        value_s("from", to_timestamp(t0, true).c_str(), false);
+        value_s("to", to_timestamp(t1, true).c_str(), true);
+        end_obj(false);
+        start_obj("offsets");
+        value_i("from", t0 * 10, false);
+        value_i("to", t1 * 10, true);
+        end_obj(end);
+    };
+
+    start_obj(nullptr);
+        start_arr("transcription");
+            // Get all of the accumulated tokens and into a single text string
+            std::string full_output;
+            for (const auto& token : accumulated_tokens) {
+                full_output += token.text;
+            }
+            start_obj(nullptr);
+                // times_o(t0, t1, false);
+                value_i("segment", speech_counter, false);
+                value_s("text", full_output.c_str(), true);
+
+                if (full) {
+                    start_arr("tokens");
+                    for (const auto& token : accumulated_tokens) {
+                        start_obj(nullptr);
+                            value_s("text", token.text.c_str(), false);
+                            if(token.data.t0 > -1 && token.data.t1 > -1) {
+                                // If we have per-token timestamps, write them out
+                                times_o(token.data.t0, token.data.t1, false);
+                            }
+                            value_i("id", token.data.id, false);
+                            value_i("tid", token.data.tid, false);
+                            value_f("p", token.data.p, false);
+                            value_f("t_dtw", token.data.t_dtw, false);
+                            value_i("vlen", token.data.vlen, true);
+                        end_obj(true);
+                    }
+                    end_arr(true);
+                }
+
+                // TODO diarization
+                // if (params.diarize && pcmf32s.size() == 2) {
+                //     value_s("speaker", estimate_diarization_speaker(pcmf32s, t0, t1, true).c_str(), true);
+                // }
+
+                // if (params.tinydiarize) {
+                //     value_b("speaker_turn_next", whisper_full_get_segment_speaker_turn_next(ctx, i), true);
+                // }
+            end_obj(true);
+        end_arr(true);
+    end_obj(true);
+    return true;
+}
+
 bool read_pcm_from_stdin(std::vector<float> &buffer, size_t num_samples) {
     std::vector<int16_t> temp_buffer(num_samples);
     size_t bytes_needed = num_samples * sizeof(int16_t);
@@ -145,7 +311,7 @@ int main(int argc, char ** argv) {
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
 
     std::vector<float> audio_buffer(BUFFER_SIZE, 0.0f);
-    std::vector<std::pair<int, std::string>> accumulated_tokens;
+    std::vector<StreamToken> accumulated_tokens;
     int last_truncated_position = 0; // Store the last truncation point
     std::string accumulated_text; // Store all transcriptions for the current segment
 
@@ -154,7 +320,6 @@ int main(int argc, char ** argv) {
         wavWriter.open("output.wav", SAMPLE_RATE, 16, 1);
     }
 
-    printf("[Listening...]\n");
     fflush(stdout);
 
     // Initialize global indexes:
@@ -180,7 +345,7 @@ int main(int argc, char ** argv) {
         }
 
         // Check if appending new_audio will fit into audio_buffer (which has fixed capacity BUFFER_SIZE)
-        printf("\nCurrent audio buffer size: %zu. New samples: %zu\n", audio_buffer.size(), new_samples);
+        // printf("\nCurrent audio buffer size: %zu. New samples: %zu\n", audio_buffer.size(), new_samples);
         if (total_index + new_samples <= BUFFER_SIZE) {
             // There's enough room: copy new samples at the end.
             std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
@@ -213,7 +378,7 @@ int main(int argc, char ** argv) {
         bool is_speaking = !::vad_simple(new_audio, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
         if (!is_speaking || !was_speaking) {
             speech_counter++;
-            printf("\n[New Speech Segment %d]\n\n", speech_counter);
+            // printf("\n[New Speech Segment %d]\n\n", speech_counter);
             fflush(stdout);
 
             // Reset the buffer and indices for a new speech segment
@@ -238,16 +403,17 @@ int main(int argc, char ** argv) {
         wparams.n_threads        = params.n_threads;
         wparams.audio_ctx        = 0;
         wparams.offset_ms        = offset_ms;
+        wparams.token_timestamps = true;
 
         if (whisper_full(ctx, wparams, audio_buffer.data(), audio_buffer.size()) != 0) {
             fprintf(stderr, "Failed to process audio\n");
             return 2;
         }
 
-        printf("\n%d / %d: ", total_ms, offset_ms);
+        // printf("\n%d / %d: ", total_ms, offset_ms);
         // printf("\33[2K\r");
         std::string speaker = "";
-        std::vector<std::pair<int, std::string>> new_tokens;
+        std::vector<StreamToken> new_tokens;
         for (int i = 0; i < whisper_full_n_segments(ctx); ++i) {
             // printf("%s ", whisper_full_get_segment_text(ctx, i));
 
@@ -259,20 +425,23 @@ int main(int argc, char ** argv) {
 
                 const char * text = whisper_full_get_token_text(ctx, i, j);
                 const float  p    = whisper_full_get_token_p   (ctx, i, j);
+                const whisper_token_data data = whisper_full_get_token_data(ctx, i, j);
+                const StreamToken token = {data, text};
 
                 const int col = std::max(0, std::min((int) k_colors.size() - 1, (int) (std::pow(p, 3)*float(k_colors.size()))));
 
                 // printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
-                new_tokens.emplace_back(id, text);
+                // printf("%s (%d/%d) ", text, data.id, id);
+                new_tokens.push_back(token);
             }
         }
 
         if (!new_tokens.empty()) {
-            int first_new_token_id = new_tokens.front().first;
+            int first_new_token_id = new_tokens.front().data.id;
             // Start looking at or after the last truncated position
             auto it = std::find_if(accumulated_tokens.begin() + last_truncated_position, accumulated_tokens.end(),
-                                [&](const std::pair<int, std::string>& token) {
-                                    return token.first == first_new_token_id;
+                                [&](const StreamToken& token) {
+                                    return token.data.id == first_new_token_id;
                                 });
 
             // If we find a match, truncate the accumulated tokens list at that point
@@ -286,8 +455,10 @@ int main(int argc, char ** argv) {
             accumulated_tokens.insert(accumulated_tokens.end(), new_tokens.begin(), new_tokens.end());
         }
 
+        // output_json(ctx, params, speech_counter, accumulated_tokens, true);
+        printf("\n%i: ", speech_counter);
         for (const auto& token : accumulated_tokens) {
-            printf("%s", token.second.c_str());
+            printf("%s (%i)", token.text.c_str(), token.data.t0);
         }
         fflush(stdout);
     }
