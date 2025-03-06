@@ -762,11 +762,11 @@ void high_pass_filter(std::vector<float> & data, float cutoff, float sample_rate
 
 bool vad_simple(std::vector<float> & pcmf32, int sample_rate, int last_ms, float vad_thold, float freq_thold, bool verbose) {
     const int n_samples      = pcmf32.size();
-    const int n_samples_last = (sample_rate * last_ms) / 1000;
+    int n_samples_last = (sample_rate * last_ms) / 1000;
 
     if (n_samples_last >= n_samples) {
-        // not enough samples - assume no speech
-        return false;
+        // Use at least half of the available buffer
+        n_samples_last = n_samples / 2;
     }
 
     if (freq_thold > 0.0f) {
