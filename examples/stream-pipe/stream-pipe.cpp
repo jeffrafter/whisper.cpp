@@ -172,7 +172,7 @@ static bool output_json(
     auto end_arr = [&](bool end) {
         indent--;
         doindent();
-        std::cout << (end ? "]\n" : "],");
+        std::cout << (end ? "]" : "],");
         donewline();
     };
 
@@ -232,8 +232,8 @@ static bool output_json(
 
     auto times_o = [&](int64_t t0, int64_t t1, bool end) {
         start_obj("timestamps");
-        value_s("from", to_timestamp(t0, true).c_str(), false);
-        value_s("to", to_timestamp(t1, true).c_str(), true);
+        value_s("from", to_timestamp(t0, false).c_str(), false);
+        value_s("to", to_timestamp(t1, false).c_str(), true);
         end_obj(false);
         start_obj("offsets");
         value_i("from", t0 * 10, false);
@@ -267,7 +267,8 @@ static bool output_json(
                             value_f("p", token.data.p, false);
                             value_f("t_dtw", token.data.t_dtw, false);
                             value_i("vlen", token.data.vlen, true);
-                        end_obj(true);
+                        bool is_end = &token == &accumulated_tokens.back();
+                        end_obj(is_end);
                     }
                     end_arr(true);
                 }
@@ -381,7 +382,7 @@ int main(int argc, char ** argv) {
         bool is_speaking = !::vad_simple(new_audio, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false);
         if (!is_speaking || !was_speaking) {
             speech_counter++;
-            printf("\n[New Speech Segment %d]\n\n", speech_counter);
+            printf("\n[New Speech Segment %d]", speech_counter);
             fflush(stdout);
 
             // Reset the buffer and indices for a new speech segment
