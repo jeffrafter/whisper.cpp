@@ -22,7 +22,7 @@ struct whisper_params {
     int32_t audio_ctx  = 0;
     int32_t beam_size  = -1;
 
-    float vad_thold    = 0.6f;
+    float vad_thold    = 0.2f;
     float freq_thold   = 100.0f;
 
     bool translate     = false;
@@ -154,35 +154,45 @@ static bool output_json(
     int indent = 0;
 
     auto doindent = [&]() {
-        for (int i = 0; i < indent; i++) std::cout << "\t";
+        // No indent
+        // for (int i = 0; i < indent; i++) std::cout << "\t";
+    };
+
+    auto donewline = [&]() {
+        // No indent
+        // std::cout << "\n";
     };
 
     auto start_arr = [&](const char *name) {
         doindent();
-        std::cout << "\"" << name << "\": [\n";
+        std::cout << "\"" << name << "\": [";
+        donewline();
         indent++;
     };
 
     auto end_arr = [&](bool end) {
         indent--;
         doindent();
-        std::cout << (end ? "]\n" : "],\n");
+        std::cout << (end ? "]\n" : "],");
+        donewline();
     };
 
     auto start_obj = [&](const char *name) {
         doindent();
         if (name) {
-            std::cout << "\"" << name << "\": {\n";
+            std::cout << "\"" << name << "\": {";
         } else {
-            std::cout << "{\n";
+            std::cout << "{";
         }
+        donewline();
         indent++;
     };
 
     auto end_obj = [&](bool end) {
         indent--;
         doindent();
-        std::cout << (end ? "}\n" : "},\n");
+        std::cout << (end ? "}" : "},");
+        donewline();
     };
 
     auto start_value = [&](const char *name) {
@@ -193,12 +203,14 @@ static bool output_json(
     auto value_s = [&](const char *name, const char *val, bool end) {
         start_value(name);
         char * val_escaped = escape_double_quotes_and_backslashes(val);
-        std::cout << "\"" << val_escaped << (end ? "\"\n" : "\",\n");
+        std::cout << "\"" << val_escaped << (end ? "\"" : "\",");
+        donewline();
         free(val_escaped);
     };
 
     auto end_value = [&](bool end) {
-        std::cout << (end ? "\n" : ",\n");
+        std::cout << (end ? "" : ",");
+        donewline();
     };
 
     auto value_i = [&](const char *name, const int64_t val, bool end) {
@@ -240,7 +252,7 @@ static bool output_json(
             start_obj(nullptr);
                 // times_o(t0, t1, false);
                 value_i("segment", speech_counter, false);
-                value_s("text", full_output.c_str(), true);
+                value_s("text", full_output.c_str(), false);
 
                 if (full) {
                     start_arr("tokens");
@@ -311,8 +323,6 @@ int main(int argc, char ** argv) {
     struct whisper_context * ctx = whisper_init_from_file_with_params(params.model.c_str(), cparams);
 
     std::vector<float> audio_buffer(BUFFER_SIZE, 0.0f);
-    std::vector<whisper_token> prompt_tokens;
-    std::vector<whisper_token> prev_prompt_tokens;
     std::vector<StreamToken> accumulated_tokens;
     std::string accumulated_text; // Store all transcriptions for the current segment
 
@@ -340,8 +350,13 @@ int main(int argc, char ** argv) {
             wavWriter.write(new_audio.data(), new_audio.size());
         }
 
+        // Build me up buttercup
+        if (new_samples < SAMPLE_RATE / 2) {
+            continue;
+        }
+
         // Update the total_index (global count) by the number of new samples read.
-        printf("\n%i/%i %i: ", speech_counter, total_index, new_samples);
+        // printf("\n%i/%i %i: ", speech_counter, total_index, new_samples);
         audio_buffer.resize(BUFFER_SIZE + total_index + new_samples);
         std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
         total_index += new_samples;
@@ -359,11 +374,6 @@ int main(int argc, char ** argv) {
             std::copy(new_audio.begin(), new_audio.end(), audio_buffer.begin() + total_index);
             total_index += new_samples;
 
-            prev_prompt_tokens.clear();
-            prev_prompt_tokens.resize(prompt_tokens.size());
-            std::copy(prompt_tokens.begin(), prompt_tokens.end(), prev_prompt_tokens.begin());
-
-            prompt_tokens.clear();
             accumulated_text.clear();
             accumulated_tokens.clear();
         }
@@ -381,8 +391,6 @@ int main(int argc, char ** argv) {
         wparams.audio_ctx        = 0;
         wparams.token_timestamps = true;
         wparams.suppress_nst     = true;
-        wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
-        wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
 
         if (audio_buffer.size() < SAMPLE_RATE / 2) {
             audio_buffer.resize(SAMPLE_RATE / 2, 0.0f);
@@ -396,7 +404,6 @@ int main(int argc, char ** argv) {
         // printf("\33[2K\r");
         std::string speaker = "";
         std::vector<StreamToken> new_tokens;
-        prompt_tokens.clear();
         for (int i = 0; i < whisper_full_n_segments(ctx); ++i) {
             // printf("%s ", whisper_full_get_segment_text(ctx, i));
 
@@ -416,13 +423,12 @@ int main(int argc, char ** argv) {
                 // printf("%s%s%s%s", speaker.c_str(), k_colors[col].c_str(), text, "\033[0m");
                 // printf("%s (%d/%d) ", text, data.id, id);
                 new_tokens.push_back(token);
-
-                prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
             }
         }
 
         accumulated_tokens = new_tokens;
 
+        // printf("\n");
         // output_json(ctx, params, speech_counter, accumulated_tokens, true);
         printf("\n%i: ", speech_counter);
         for (const auto& token : accumulated_tokens) {
@@ -431,6 +437,7 @@ int main(int argc, char ** argv) {
         fflush(stdout);
     }
 
+    printf("\n\nWE ARE DONE");
     whisper_free(ctx);
     return 0;
 }
