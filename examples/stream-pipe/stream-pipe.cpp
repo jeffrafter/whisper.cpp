@@ -7,9 +7,8 @@
 #include <iostream>
 #include <fstream>
 
-#define SAMPLE_RATE 16000
 #define BUFFER_DURATION_SEC 10
-#define BUFFER_SIZE (SAMPLE_RATE * BUFFER_DURATION_SEC)
+#define BUFFER_SIZE (WHISPER_SAMPLE_RATE * BUFFER_DURATION_SEC)
 
 // command-line parameters
 struct whisper_params {
@@ -287,22 +286,34 @@ static bool output_json(
     return true;
 }
 
-bool read_pcm_from_stdin(std::vector<float> &buffer, size_t num_samples) {
-    std::vector<int16_t> temp_buffer(num_samples);
-    size_t bytes_needed = num_samples * sizeof(int16_t);
+bool read_pcm_from_stdin(std::vector<float> &buffer, size_t num_mono_samples) {
+    // For stereo input, we expect 2 * num_mono_samples int16 values.
+    size_t num_samples_expected = num_mono_samples * 2;
+    std::vector<int16_t> temp_buffer(num_samples_expected);
+    size_t bytes_needed = num_samples_expected * sizeof(int16_t);
     size_t bytes_read = fread(temp_buffer.data(), 1, bytes_needed, stdin);
-
     if (bytes_read == 0) return false;
 
-    for (size_t i = 0; i < bytes_read / sizeof(int16_t); i++) {
-        buffer.push_back(temp_buffer[i] / 32768.0f);
+    size_t samples_read = bytes_read / sizeof(int16_t);
+    if (samples_read % 2 != 0) {
+        // If we got an odd number of samples, drop the last sample.
+        samples_read -= 1;
     }
 
+    // Process every pair as one mono sample.
+    for (size_t i = 0; i < samples_read; i += 2) {
+        int16_t left = temp_buffer[i];
+        int16_t right = temp_buffer[i + 1];
+        int16_t mono = (left + right) / 2;
+        buffer.push_back(mono / 32768.0f);
+    }
     return true;
 }
 
 int main(int argc, char ** argv) {
     whisper_params params;
+
+    std::cout << "Whisper sample rate: " << WHISPER_SAMPLE_RATE << std::endl;
 
     if (whisper_params_parse(argc, argv, params) == false) {
         return 1;
@@ -328,7 +339,13 @@ int main(int argc, char ** argv) {
 
     wav_writer wavWriter;
     if (params.save_audio) {
-        wavWriter.open("output.wav", SAMPLE_RATE, 16, 1);
+        // Get current date/time for filename
+        time_t now = time(0);
+        char buffer[80];
+        strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
+        std::string filename = std::string(buffer) + ".wav";
+
+        wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
 
     fflush(stdout);
@@ -340,7 +357,7 @@ int main(int argc, char ** argv) {
 
     while (true) {
         std::vector<float> new_audio;
-        if (!read_pcm_from_stdin(new_audio, SAMPLE_RATE / 2)) {
+        if (!read_pcm_from_stdin(new_audio, WHISPER_SAMPLE_RATE / 2)) {
             break;
         }
 
@@ -351,7 +368,7 @@ int main(int argc, char ** argv) {
         }
 
         // Build me up buttercup
-        if (new_samples < SAMPLE_RATE / 2) {
+        if (new_samples < WHISPER_SAMPLE_RATE / 2) {
             continue;
         }
 
@@ -377,7 +394,7 @@ int main(int argc, char ** argv) {
             accumulated_text.clear();
             accumulated_tokens.clear();
         }
-        int total_ms = ((int)total_index * 1000) / SAMPLE_RATE;
+        int total_ms = ((int)total_index * 1000) / WHISPER_SAMPLE_RATE;
 
         was_speaking = is_speaking;
 
@@ -392,8 +409,8 @@ int main(int argc, char ** argv) {
         wparams.token_timestamps = true;
         wparams.suppress_nst     = true;
 
-        if (audio_buffer.size() < SAMPLE_RATE / 2) {
-            audio_buffer.resize(SAMPLE_RATE / 2, 0.0f);
+        if (audio_buffer.size() < WHISPER_SAMPLE_RATE / 2) {
+            audio_buffer.resize(WHISPER_SAMPLE_RATE / 2, 0.0f);
         }
 
         if (whisper_full(ctx, wparams, audio_buffer.data(), audio_buffer.size()) != 0) {
