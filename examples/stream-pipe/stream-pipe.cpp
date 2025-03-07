@@ -445,16 +445,15 @@ int main(int argc, char ** argv) {
 
         accumulated_tokens = new_tokens;
 
-        // printf("\n");
-        // output_json(ctx, params, speech_counter, accumulated_tokens, true);
-        printf("\n%i: ", speech_counter);
-        for (const auto& token : accumulated_tokens) {
-            printf("%s", token.text.c_str());
-        }
+        printf("\n");
+        output_json(ctx, params, speech_counter, accumulated_tokens, true);
+        // printf("\n%i: ", speech_counter);
+        // for (const auto& token : accumulated_tokens) {
+        //     printf("%s", token.text.c_str());
+        // }
         fflush(stdout);
     }
 
-    printf("\n\nWE ARE DONE");
     whisper_free(ctx);
     return 0;
 }
